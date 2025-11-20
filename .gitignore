@@ -5,3 +5,6 @@ node_modules/
 *.json
 *.pdf
 uploads/*
+.cpython-*
+*.pyc
+__pycache__/
