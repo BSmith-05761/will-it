@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState, useLayoutEffect } from 'react'
 import './App.css'
 
 export default function App() {
@@ -11,8 +11,18 @@ export default function App() {
   const [toolActivity, setToolActivity] = useState(null)
   const [debugEvents, setDebugEvents] = useState([])
   const [mode, setMode] = useState('research')
+  const [draftSections, setDraftSections] = useState({})
+  const [chatHeight, setChatHeight] = useState(900)
+  const [chatResizing, setChatResizing] = useState(false)
+  const [draftWidth, setDraftWidth] = useState(420)
+  const [resizing, setResizing] = useState(false)
+  const [draftZoom, setDraftZoom] = useState(0.9)
+  const [autoScroll, setAutoScroll] = useState(true)
+  const [reasoningAutoScroll, setReasoningAutoScroll] = useState(true)
   const wsRef = useRef(null)
   const fileInputRef = useRef(null)
+  const messageScrollRef = useRef(null)
+  const reasoningScrollRef = useRef(null)
 
   useEffect(() => {
     if (!reasoningActive) {
@@ -85,6 +95,19 @@ export default function App() {
           })
         } else if (msg.type === 'assistant_reasoning_done') {
           setReasoningActive(false)
+        } else if (msg.type === 'draft_update') {
+          const key = msg.section || 'draft'
+          setDraftSections((prev) => ({
+            ...prev,
+            [key]: { title: msg.title || key, markdown: msg.markdown || '' },
+          }))
+          appendToolMessage(`Draft updated: ${msg.title || msg.section || 'draft'}`)
+          appendDebugEvent({
+            kind: 'draft',
+            section: msg.section,
+            markdown: msg.markdown,
+            timestamp: Date.now(),
+          })
         } else if (msg.type === 'tool_event') {
           handleToolEvent(msg)
         } else if (msg.type === 'error') {
@@ -101,6 +124,98 @@ export default function App() {
       ws.close()
     }
   }, [session])
+
+useLayoutEffect(() => {
+  if (autoScroll && messageScrollRef.current) {
+    const el = messageScrollRef.current
+    el.scrollTop = el.scrollHeight
+  }
+}, [messages, reasoningActive, autoScroll])
+
+  const reasoningFeed = messages.filter((m) => m.role === 'assistant_reasoning' || m.role === 'assistant_reasoning_summary').slice(-5)
+
+  useLayoutEffect(() => {
+    if (reasoningAutoScroll && reasoningScrollRef.current) {
+      const el = reasoningScrollRef.current
+      el.scrollTop = el.scrollHeight
+    }
+  }, [reasoningFeed, reasoningActive, reasoningAutoScroll])
+
+  useEffect(() => {
+    if (!resizing) return
+    const onMove = (e) => {
+      const space = document.querySelector('.workspace')
+      if (!space) return
+      const rect = space.getBoundingClientRect()
+      const handleWidth = 12
+      const minDraft = 200
+      const minConversation = 320
+      const maxDraft = Math.max(minDraft, rect.width - minConversation - handleWidth - 12)
+      let desired = rect.right - e.clientX
+      desired = Math.max(minDraft, Math.min(desired, maxDraft))
+      setDraftWidth(desired)
+    }
+    const onUp = () => setResizing(false)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [resizing])
+
+  useEffect(() => {
+    const computeHeight = () => {
+      const shell = document.querySelector('.app-shell')
+      if (!shell) return Math.round(window.innerHeight * 1.5)
+      const rect = shell.getBoundingClientRect()
+      const debug = document.querySelector('.insight-panel')
+      const debugRect = debug?.getBoundingClientRect()
+      if (!debugRect) return rect.height
+      const offsetTop = document.querySelector('.conversation-card')?.getBoundingClientRect().top || 0
+      const height = debugRect.bottom - offsetTop
+      return Math.max(360, Math.min(1800, height))
+    }
+
+    const updateHeight = () => setChatHeight(computeHeight())
+    updateHeight()
+    window.addEventListener('resize', updateHeight)
+    return () => window.removeEventListener('resize', updateHeight)
+  }, [])
+
+  useEffect(() => {
+    if (!chatResizing) return
+    const onMove = (e) => {
+      const minHeight = 360
+      const maxHeight = 2200
+      const delta = e.clientY
+      const top = document.querySelector('.conversation-card')?.getBoundingClientRect().top || 0
+      const computed = Math.min(Math.max(delta - top, minHeight), maxHeight)
+      setChatHeight(computed)
+    }
+    const onUp = () => setChatResizing(false)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [chatResizing])
+  useEffect(() => {
+    const onResize = () => {
+      const space = document.querySelector('.workspace')
+      if (!space) return
+      const rect = space.getBoundingClientRect()
+      const handleWidth = 12
+      const minConversation = 320
+      const minDraft = 200
+      let maxDraft = rect.width - minConversation - handleWidth - 12
+      if (maxDraft < minDraft) maxDraft = minDraft
+      setDraftWidth((current) => Math.min(Math.max(minDraft, current), maxDraft))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [draftWidth])
 
   const send = () => {
     const t = text.trim()
@@ -138,8 +253,6 @@ export default function App() {
     if (role?.startsWith('assistant_reasoning')) return 'message-bubble reasoning'
     return 'message-bubble'
   }
-
-  const reasoningFeed = messages.filter((m) => m.role === 'assistant_reasoning' || m.role === 'assistant_reasoning_summary').slice(-3)
 
   function handleToolEvent(evt) {
     const label = toolLabelFromEvent(evt?.event_type, evt?.details)
@@ -192,6 +305,10 @@ export default function App() {
       const info = evt.details?.query || evt.details?.input || ''
       return `${name} ${evt.note || ''} ${info}`.trim()
     }
+    if (evt.kind === 'draft') {
+      const snippet = (evt.markdown || '').slice(0, 80)
+      return `draft:${evt.section || 'main'} ${snippet}${snippet.length === 80 ? '…' : ''}`
+    }
     return JSON.stringify(evt)
   }
 
@@ -219,8 +336,7 @@ export default function App() {
 
       <header className="app-header">
         <div>
-          <p className="eyebrow">WILLIT</p>
-          <h1>Sharper Wills with an On-Call Copilot</h1>
+          <p className="eyebrow">WILL-IT — Sharper wills with an on-call copilot</p>
           <p className="lede">Stream answers, drop evidence, and watch the assistant reason through every requirement.</p>
         </div>
         <button className="ghost-button" onClick={triggerUpload}>
@@ -228,8 +344,8 @@ export default function App() {
         </button>
       </header>
 
-      <main className="workspace">
-        <section className="conversation-card">
+      <main className="workspace" style={{ gridTemplateColumns: `minmax(320px, 1fr) 12px ${Math.max(200, draftWidth)}px` }}>
+        <section className="conversation-card" style={{ height: `${chatHeight}px` }}>
           <div className="card-header">
             <div>
               <h2>Conversation</h2>
@@ -270,23 +386,46 @@ export default function App() {
             </div>
           </div>
 
-          <div className="message-scroll">
-            {messages.length === 0 && (
-              <div className="empty-state">
-                <p>Ask anything about probate rules, upload prior wills, or paste tricky scenarios to get started.</p>
-              </div>
-            )}
+          <div className="message-scroll-container">
+            <div
+              className="message-scroll"
+              ref={messageScrollRef}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+                setAutoScroll(nearBottom)
+              }}
+            >
+              {messages.length === 0 && (
+                <div className="empty-state">
+                  <p>Ask anything about probate rules, upload prior wills, or paste tricky scenarios to get started.</p>
+                </div>
+              )}
             {messages.map((m, i) => (
               <div key={i} className={roleClass(m.role)}>
                 <div className="message-role">{roleLabel[m.role] || m.role}</div>
                 <div className="message-text">{m.text}</div>
               </div>
             ))}
-            {reasoningActive && (
-              <div className="reasoning-indicator">
-                <div className="ping" style={{ opacity: 0.4 + 0.15 * reasoningDots }} />
-                <span>Assistant is reasoning{'.'.repeat(reasoningDots)}</span>
-              </div>
+              {reasoningActive && (
+                <div className="reasoning-indicator">
+                  <div className="ping" style={{ opacity: 0.4 + 0.15 * reasoningDots }} />
+                  <span>Assistant is reasoning{'.'.repeat(reasoningDots)}</span>
+                </div>
+              )}
+            </div>
+            {!autoScroll && (
+              <button
+                className="jump-latest"
+                onClick={() => {
+                  if (messageScrollRef.current) {
+                    messageScrollRef.current.scrollTop = messageScrollRef.current.scrollHeight
+                  }
+                  setAutoScroll(true)
+                }}
+              >
+                Jump to latest
+              </button>
             )}
           </div>
 
@@ -316,17 +455,85 @@ export default function App() {
           </div>
         </section>
 
-        <aside className="insight-panel">
+        <div
+          className={`resize-handle ${resizing ? 'active' : ''}`}
+          onMouseDown={() => setResizing(true)}
+        >
+          <span />
+        </div>
+
+        <aside className="insight-panel" style={{ width: `${draftWidth}px` }}>
+          <div className="draft-card">
+            <div className="draft-card-header">
+              <div>
+                <h3>Draft</h3>
+                <p className="muted">Model updates appear here via the Drafter tool.</p>
+              </div>
+              <div className="draft-card-actions">
+                <div className="zoom-buttons">
+                  <button className="ghost-button subtle" onClick={() => setDraftZoom((z) => Math.max(0.6, z - 0.1))}>
+                    −
+                  </button>
+                  <button className="ghost-button subtle" onClick={() => setDraftZoom((z) => Math.min(1.5, z + 0.1))}>
+                    +
+                  </button>
+                </div>
+                {Object.keys(draftSections).length > 0 && (
+                  <button className="ghost-button subtle" onClick={() => setDraftSections({})}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            {Object.keys(draftSections).length === 0 ? (
+              <p className="muted">No draft content yet. The assistant will fill this panel when it calls the Drafter tool.</p>
+            ) : (
+              <div className="draft-doc" style={{ fontSize: `${draftZoom}rem` }}>
+                {Object.entries(draftSections).map(([key, value]) => (
+                  <section key={key}>
+                    <h4>{value.title || key}</h4>
+                    <div
+                      className="draft-markdown"
+                      dangerouslySetInnerHTML={{ __html: toSimpleHtml(value.markdown || '') }}
+                    />
+                  </section>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="insight-card">
             <h3>Reasoning feed</h3>
             {reasoningFeed.length === 0 && !reasoningActive && <p className="muted">The assistant’s chain-of-thought will appear here when available.</p>}
-            {reasoningFeed.map((m, i) => (
-              <div key={i} className="chip">
-                <span className="chip-label">{roleLabel[m.role] || m.role}</span>
-                <p>{m.text}</p>
-              </div>
-            ))}
-            {reasoningActive && <p className="muted">Analyzing… stay tuned.</p>}
+            <div
+              className="reasoning-feed"
+              ref={reasoningScrollRef}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+                setReasoningAutoScroll(nearBottom)
+              }}
+            >
+              {reasoningFeed.map((m, i) => (
+                <div key={i} className="chip">
+                  <span className="chip-label">{roleLabel[m.role] || m.role}</span>
+                  <p>{m.text}</p>
+                </div>
+              ))}
+              {reasoningActive && <p className="muted">Analyzing… stay tuned.</p>}
+            </div>
+            {!reasoningAutoScroll && reasoningFeed.length > 0 && (
+              <button
+                className="ghost-button subtle"
+                onClick={() => {
+                  if (reasoningScrollRef.current) {
+                    reasoningScrollRef.current.scrollTop = reasoningScrollRef.current.scrollHeight
+                  }
+                  setReasoningAutoScroll(true)
+                }}
+              >
+                Jump to latest
+              </button>
+            )}
           </div>
           <div className="insight-card">
             <h3>Session tools</h3>
@@ -350,6 +557,23 @@ export default function App() {
           </div>
         </aside>
       </main>
+      <div className={`chat-resize-handle ${chatResizing ? 'active' : ''}`} onMouseDown={() => setChatResizing(true)}>
+        <span />
+      </div>
     </div>
   )
+}
+
+function toSimpleHtml(markdown = '') {
+  // very lightweight markdown rendering (bold + line breaks + bullet dashes)
+  let html = markdown
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>')
+  html = html.replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>')
+  html = html.replace(/\n{2,}/g, '<br/><br/>').replace(/\n/g, '<br/>')
+  return html
 }

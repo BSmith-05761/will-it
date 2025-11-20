@@ -7,6 +7,7 @@ from pathlib import Path
 import logging
 import json
 from datetime import datetime
+from collections import defaultdict
 
 from .prompt_drivers import stream_gpt_web_responses
 
@@ -72,8 +73,9 @@ async def _fallback_stream(ws_send_json: Callable[[dict], Any], session_id: str 
         await ws_send_json({"type": "assistant_delta", "text_delta": chunk, "full_text": full_text})
 
 
-# In-memory conversation history per session_id
+# In-memory session data
 _HISTORY: dict[str, List[dict]] = {}
+_DRAFTS: dict[str, dict] = defaultdict(dict)
 
 
 def _persist_history(session_id: str):
@@ -192,10 +194,14 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
                     )
                 )
 
-            def on_tool_event(event_type: str, payload: dict):
-                logger.info("Tool event [%s]: %s", event_type, payload)
+            def on_tool_event(event_type: str, payload):
+                norm_payload = payload if isinstance(payload, dict) else {"details": payload}
+                logger.info("Tool event [%s]: %s", event_type, norm_payload)
+                if event_type.endswith("function_call_arguments.done"):
+                    raw_details = norm_payload.get("details")
+                    _handle_function_event(session_id, event_type, raw_details, loop, ws_send_json)
                 loop.call_soon_threadsafe(
-                    lambda evt=event_type, data=payload: asyncio.create_task(
+                    lambda evt=event_type, data=norm_payload: asyncio.create_task(
                         ws_send_json(
                             {
                                 "type": "tool_event",
@@ -237,3 +243,54 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
             await _fallback_stream(ws_send_json, session_id)
     finally:
         _persist_history(session_id)
+        _persist_drafts(session_id)
+
+
+def _persist_drafts(session_id: str):
+    try:
+        drafts = _DRAFTS.get(session_id)
+        if drafts is None:
+            return
+        path = UPLOAD_ROOT / session_id
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "draft_history.json").write_text(
+            json.dumps(drafts, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.exception("Failed to persist draft for %s: %s", session_id, exc)
+
+
+def _handle_function_event(
+    session_id: str,
+    event_type: str,
+    details: Any,
+    loop: asyncio.AbstractEventLoop,
+    ws_send_json,
+):
+    if not event_type.endswith(".done") or details is None:
+        return
+    args = details if isinstance(details, str) else details.get("arguments")
+    if not args:
+        return
+    try:
+        parsed = json.loads(args)
+    except Exception:
+        return
+    section = parsed.get("section") or "draft"
+    title = parsed.get("title") or section.title()
+    markdown = parsed.get("markdown") or ""
+    _DRAFTS[session_id][section] = {"title": title, "markdown": markdown}
+
+    loop.call_soon_threadsafe(
+        lambda: asyncio.create_task(
+            ws_send_json(
+                {
+                    "type": "draft_update",
+                    "section": section,
+                    "title": title,
+                    "markdown": markdown,
+                }
+            )
+        )
+    )

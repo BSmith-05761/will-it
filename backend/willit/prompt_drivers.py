@@ -555,6 +555,22 @@ def stream_gpt_web_responses(
                     "search_context_size": "medium",
                 }
             )
+        tool_payload.append(
+            {
+                "type": "function",
+                "name": "drafter",
+                "description": "update the draft using this tool, it Renders or update the running will draft using markdown.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "section": {"type": "string", "description": "Draft section key, e.g., 'intro', 'executors'"},
+                        "title": {"type": "string", "description": "Section title to show in the draft widget"},
+                        "markdown": {"type": "string", "description": "Markdown content to render"},
+                    },
+                    "required": ["markdown"],
+                },
+            }
+        )
         with sync_client.responses.stream(
             model=model_name,
             input=input_prompt,
@@ -590,12 +606,21 @@ def stream_gpt_web_responses(
                     ".tool" in etype
                     or ".search" in etype
                     or etype.startswith("response.mcp_")
+                    or "function_call" in etype
                 ):
-                    payload: dict[str, str] = {}
+                    payload: dict[str, Any] = {}
+                    details: dict[str, str] = {}
                     for attr in ("server_label", "tool", "tool_name", "name", "status"):
                         val = getattr(event, attr, None)
                         if isinstance(val, str):
-                            payload[attr] = val
+                            details[attr] = val
+                    arg_text = getattr(event, "arguments", None)
+                    delta_text = getattr(event, "delta", None)
+                    if isinstance(arg_text, str):
+                        details["arguments"] = arg_text
+                    elif isinstance(delta_text, str):
+                        details["arguments"] = delta_text
+                    payload["details"] = details
                     on_tool_event(etype, payload)
             response = stream.get_final_response()
             final_response_text = response.output_text
