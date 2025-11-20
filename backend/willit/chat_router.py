@@ -8,6 +8,7 @@ import logging
 import json
 from datetime import datetime
 from collections import defaultdict
+from uuid import uuid4
 
 from .prompt_drivers import stream_gpt_web_responses
 
@@ -138,7 +139,8 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
     text = (message or {}).get("text") or ""
     mode = ((message or {}).get("mode") or "research").lower()
     logger.info(f"[{session_id}] user: {text} (mode={mode})")
-    await ws_send_json({"type": "ack", "received": "user_message"})
+    message_id = str(uuid4())
+    await ws_send_json({"type": "ack", "received": "user_message", "message_id": message_id})
     # Append user message
     history = _get_history(session_id)
     history.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
@@ -168,6 +170,7 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
                                 "type": "assistant_delta",
                                 "text_delta": text_delta,
                                 "full_text": full_text,
+                                "message_id": message_id,
                             }
                         )
                     )
@@ -189,6 +192,7 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
                                 "variant": kind,
                                 "text_delta": text_delta,
                                 "full_text": full_text,
+                                "message_id": message_id,
                             }
                         )
                     )
@@ -233,6 +237,13 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
                     await ws_send_json({"type": "assistant_reasoning_done"})
                 history.append({"role": "assistant", "content": [{"type": "output_text", "text": final}]})
                 logger.info(f"[{session_id}] assistant: {final}")
+                await ws_send_json(
+                    {
+                        "type": "assistant_complete",
+                        "message_id": message_id,
+                        "text": final,
+                    }
+                )
             except Exception as e:
                 await ws_send_json({"type": "error", "code": "stream_failed", "message": str(e)})
                 logger.exception(f"[{session_id}] model stream failed: {e}")
@@ -241,6 +252,7 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
                 await _fallback_stream(ws_send_json, session_id)
         else:
             await _fallback_stream(ws_send_json, session_id)
+            await ws_send_json({"type": "assistant_complete", "message_id": message_id, "text": ""})
     finally:
         _persist_history(session_id)
         _persist_drafts(session_id)

@@ -1,6 +1,43 @@
 import React, { useEffect, useRef, useState, useLayoutEffect } from 'react'
 import './App.css'
 
+const chunkTextForSpeech = (text, maxChars = 1400, minChars = 600) => {
+  if (!text) return []
+  if (text.length <= maxChars) return [text]
+  const chunks = []
+  let start = 0
+  const total = text.length
+  while (start < total) {
+    let end = Math.min(start + maxChars, total)
+    if (end >= total) {
+      chunks.push(text.slice(start))
+      break
+    }
+    const searchFloor = Math.min(start + minChars, end)
+    let splitPos = -1
+    for (let i = end; i > searchFloor; i -= 1) {
+      if (text[i - 1] === '\n') {
+        splitPos = i
+        break
+      }
+    }
+    if (splitPos === -1) {
+      for (let i = end; i > searchFloor; i -= 1) {
+        if (text[i - 1] === ' ') {
+          splitPos = i
+          break
+        }
+      }
+    }
+    if (splitPos === -1 || splitPos <= start) {
+      splitPos = end
+    }
+    chunks.push(text.slice(start, splitPos))
+    start = splitPos
+  }
+  return chunks
+}
+
 export default function App() {
   const backend = (import.meta.env && import.meta.env.VITE_BACKEND_URL) || 'http://localhost:8000'
   const [session, setSession] = useState(null)
@@ -19,10 +56,25 @@ export default function App() {
   const [draftZoom, setDraftZoom] = useState(0.9)
   const [autoScroll, setAutoScroll] = useState(true)
   const [reasoningAutoScroll, setReasoningAutoScroll] = useState(true)
+  const [isRecording, setIsRecording] = useState(false)
+  const [voiceBusy, setVoiceBusy] = useState(false)
+  const [voiceError, setVoiceError] = useState(null)
+  const [voiceAutoSend, setVoiceAutoSend] = useState(false)
+  const [voiceTranscript, setVoiceTranscript] = useState('')
+  const [voicePlaying, setVoicePlaying] = useState(false)
+  const [voicePaused, setVoicePaused] = useState(false)
+  const [readResponses, setReadResponses] = useState(true)
   const wsRef = useRef(null)
   const fileInputRef = useRef(null)
   const messageScrollRef = useRef(null)
   const reasoningScrollRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const recordedChunksRef = useRef([])
+  const audioRef = useRef(typeof Audio !== 'undefined' ? new Audio() : null)
+  const voiceQueueRef = useRef([])
+  const requestTTSRef = useRef(null)
+  const readResponsesRef = useRef(true)
+  const ttsRunIdRef = useRef(0)
 
   useEffect(() => {
     if (!reasoningActive) {
@@ -34,6 +86,10 @@ export default function App() {
   }, [reasoningActive])
 
   useEffect(() => {
+    readResponsesRef.current = readResponses
+  }, [readResponses])
+
+  useEffect(() => {
     fetch(backend + '/api/health').catch(() => {})
     fetch(backend + '/api/sessions', {
       method: 'POST',
@@ -42,6 +98,18 @@ export default function App() {
     })
       .then((r) => r.json())
       .then((s) => setSession(s))
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop()
+      }
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.src = ''
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -112,6 +180,10 @@ export default function App() {
           handleToolEvent(msg)
         } else if (msg.type === 'error') {
           setMessages((prev) => [...prev, { role: 'tool', text: `Error: ${msg.message || msg.code}` }])
+        } else if (msg.type === 'assistant_complete') {
+          if (readResponsesRef.current && requestTTSRef.current) {
+            requestTTSRef.current(msg.text)
+          }
         }
       } catch {
         /* ignore malformed frames */
@@ -217,13 +289,16 @@ useLayoutEffect(() => {
     return () => window.removeEventListener('resize', onResize)
   }, [draftWidth])
 
-  const send = () => {
-    const t = text.trim()
+  const sendMessage = (content) => {
+    const t = content.trim()
     if (!t || !wsRef.current) return
     setMessages((prev) => [...prev, { role: 'user', text: t, meta: { mode } }])
     wsRef.current.send(JSON.stringify({ type: 'user_message', text: t, mode }))
     setText('')
+    setVoiceTranscript('')
   }
+
+  const send = () => sendMessage(text)
 
   const onUpload = async (e) => {
     const files = Array.from(e.target.files || [])
@@ -240,6 +315,164 @@ useLayoutEffect(() => {
   }
 
   const triggerUpload = () => fileInputRef.current?.click()
+
+  const uploadVoiceBlob = async (blob) => {
+    if (!blob || blob.size === 0) return
+    setVoiceBusy(true)
+    setVoiceError(null)
+    try {
+      const fd = new FormData()
+      fd.append('audio', blob, 'voice.webm')
+      const res = await fetch(`${backend}/api/voice-query`, { method: 'POST', body: fd })
+      if (!res.ok) throw new Error(`Voice query failed (${res.status})`)
+      const data = await res.json()
+      if (data?.transcript) {
+        if (voiceAutoSend) {
+          sendMessage(data.transcript)
+          setVoiceTranscript('')
+        } else {
+          setVoiceTranscript(data.transcript)
+          setText(data.transcript)
+        }
+      }
+    } catch (err) {
+      console.error(err)
+      setVoiceError('Voice request failed. Please try again.')
+    } finally {
+      setVoiceBusy(false)
+    }
+  }
+
+  const enqueueAudio = (base64) => {
+    if (!base64) return
+    voiceQueueRef.current.push(base64)
+    playNextAudio()
+  }
+
+  const playNextAudio = async () => {
+    if (!audioRef.current) return
+    if (voicePlaying || voicePaused || !voiceQueueRef.current.length) return
+    const next = voiceQueueRef.current.shift()
+    audioRef.current.src = `data:audio/mp3;base64,${next}`
+    setVoicePlaying(true)
+    setVoicePaused(false)
+    audioRef.current.onended = () => {
+      setVoicePlaying(false)
+      setVoicePaused(false)
+      playNextAudio()
+    }
+    try {
+      await audioRef.current.play()
+    } catch (err) {
+      console.error(err)
+      setVoicePlaying(false)
+      playNextAudio()
+    }
+  }
+
+  const cancelPendingAudio = () => {
+    ttsRunIdRef.current += 1
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+    }
+    voiceQueueRef.current = []
+    setVoicePlaying(false)
+    setVoicePaused(false)
+  }
+
+  const requestTTS = async (text) => {
+    const trimmed = text?.trim()
+    if (!trimmed) return
+    cancelPendingAudio()
+    setVoiceError(null)
+    const runId = ttsRunIdRef.current
+    const chunks = chunkTextForSpeech(trimmed)
+    if (!chunks.length) return
+    for (const chunk of chunks) {
+      if (ttsRunIdRef.current !== runId) break
+      try {
+        const res = await fetch(`${backend}/api/tts`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: chunk }),
+        })
+        if (!res.ok) throw new Error('tts failed')
+        const data = await res.json()
+        if (ttsRunIdRef.current !== runId) break
+        if (!data?.audio_base64) continue
+        enqueueAudio(data.audio_base64)
+      } catch (err) {
+        if (ttsRunIdRef.current !== runId) break
+        console.error(err)
+        setVoiceError('Unable to play voice reply.')
+        break
+      }
+    }
+  }
+
+  useEffect(() => {
+    requestTTSRef.current = requestTTS
+  }, [requestTTS])
+
+  const stopVoicePlayback = () => {
+    cancelPendingAudio()
+  }
+
+  const pauseVoicePlayback = () => {
+    if (!audioRef.current) return
+    if (!voicePlaying || voicePaused) return
+    audioRef.current.pause()
+    setVoicePaused(true)
+  }
+
+  const resumeVoicePlayback = async () => {
+    if (!audioRef.current) return
+    if (!voicePlaying || !voicePaused) return
+    try {
+      await audioRef.current.play()
+      setVoicePaused(false)
+    } catch (err) {
+      console.error(err)
+      setVoiceError('Unable to resume voice playback.')
+    }
+  }
+
+  const startRecording = async () => {
+    if (isRecording || voiceBusy) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? { mimeType: 'audio/webm;codecs=opus' }
+        : undefined
+      const recorder = new MediaRecorder(stream, options)
+      recordedChunksRef.current = []
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedChunksRef.current.push(event.data)
+        }
+      }
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop())
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+        recordedChunksRef.current = []
+        uploadVoiceBlob(blob)
+      }
+      recorder.start()
+      mediaRecorderRef.current = recorder
+      setIsRecording(true)
+      setVoiceError(null)
+    } catch (err) {
+      console.error(err)
+      setVoiceError('Microphone access denied or unavailable.')
+    }
+  }
+
+  const stopRecording = () => {
+    if (!isRecording || !mediaRecorderRef.current) return
+    mediaRecorderRef.current.stop()
+    setIsRecording(false)
+  }
 
   const roleLabel = {
     assistant_reasoning: 'assistant (reasoning)',
@@ -447,12 +680,39 @@ useLayoutEffect(() => {
               <button className="ghost-button subtle" onClick={triggerUpload}>
                 Upload
               </button>
-              <span className="hint">Cmd/Ctrl + Enter</span>
               <button className="primary-button" onClick={send}>
                 Send
               </button>
             </div>
           </div>
+          {voiceTranscript && (
+            <div className="voice-transcript-panel">
+              <p>Voice transcript captured. Review before sending:</p>
+              <div className="voice-transcript-text">{voiceTranscript}</div>
+              <div className="voice-transcript-actions">
+                <button
+                  className="primary-button"
+                  onClick={() => {
+                    sendMessage(voiceTranscript)
+                  }}
+                >
+                  Send voice text
+                </button>
+                <button
+                  className="ghost-button subtle"
+                  onClick={() => {
+                    setText(voiceTranscript)
+                    setVoiceTranscript('')
+                  }}
+                >
+                  Keep editing
+                </button>
+                <button className="ghost-button subtle" onClick={() => setVoiceTranscript('')}>
+                  Clear transcript
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <div
@@ -500,6 +760,81 @@ useLayoutEffect(() => {
                 ))}
               </div>
             )}
+          </div>
+          <div className="voice-card">
+            <div className="voice-card-header">
+              <div>
+                <h3>Voice controls</h3>
+                <p className="muted">Record, auto-send, and manage read-back here.</p>
+              </div>
+              <span className="voice-status">
+                {isRecording
+                  ? 'Recording…'
+                  : voiceBusy
+                  ? 'Processing…'
+                  : voicePlaying
+                  ? voicePaused
+                    ? 'Voice paused'
+                    : 'Playing reply…'
+                  : voiceTranscript
+                  ? 'Transcript ready'
+                  : 'Idle'}
+              </span>
+            </div>
+            <div className="voice-toggle-list">
+              <label className="toggle-control">
+                <input
+                  type="checkbox"
+                  checked={voiceAutoSend}
+                  onChange={(e) => setVoiceAutoSend(e.target.checked)}
+                />
+                <span className="toggle-track">
+                  <span className="toggle-thumb" />
+                </span>
+                <span className="toggle-label">Auto-send voice</span>
+              </label>
+              <label className="toggle-control">
+                <input
+                  type="checkbox"
+                  checked={readResponses}
+                  onChange={(e) => setReadResponses(e.target.checked)}
+                />
+                <span className="toggle-track">
+                  <span className="toggle-thumb" />
+                </span>
+                <span className="toggle-label">Read response aloud</span>
+              </label>
+            </div>
+            <div className="voice-button-grid">
+              <button
+                className={`ghost-button subtle mic-button ${isRecording ? 'recording' : ''}`}
+                onClick={() => {
+                  if (isRecording) {
+                    stopRecording()
+                  } else {
+                    startRecording()
+                  }
+                }}
+                disabled={voiceBusy && !isRecording}
+              >
+                {isRecording ? 'Stop recording' : '🎤 Start recording'}
+              </button>
+              <button
+                className="ghost-button subtle"
+                onClick={voicePaused ? resumeVoicePlayback : pauseVoicePlayback}
+                disabled={!voicePlaying}
+              >
+                {voicePaused ? 'Resume voice' : 'Pause voice'}
+              </button>
+              <button
+                className="ghost-button subtle"
+                onClick={stopVoicePlayback}
+                disabled={!voicePlaying && !voicePaused}
+              >
+                Stop voice
+              </button>
+            </div>
+            {voiceError && <p className="voice-error-inline">{voiceError}</p>}
           </div>
           <div className="insight-card">
             <h3>Reasoning feed</h3>

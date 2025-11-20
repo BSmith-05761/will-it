@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import base64
 from pathlib import Path
 from uuid import uuid4
 from typing import List
@@ -8,6 +9,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, APIRouter, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 """Ensure project root (will-it) is on sys.path so `prompt_drivers` is importable.
 This is necessary when running `python backend/main.py` locally.
@@ -29,6 +31,7 @@ except Exception:
 
 from willit.preprocessing import preprocess_documents
 from willit.chat_router import handle_user_message
+from willit.voice import transcribe_audio, generate_speech
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -100,6 +103,41 @@ def create_app() -> FastAPI:
         except Exception:
             logging.exception("Failed to persist preprocessed text for session %s", sid)
         return JSONResponse(result)
+
+    @api.post("/voice-query")
+    async def voice_query(audio: UploadFile = File(...)):
+        if audio is None:
+            raise HTTPException(status_code=400, detail="audio file required")
+        blob = await audio.read()
+        if not blob:
+            raise HTTPException(status_code=400, detail="empty audio payload")
+        try:
+            transcript = transcribe_audio(blob, audio.content_type or audio.headers.get("content-type"))
+        except Exception as exc:
+            logging.exception("voice transcription failed: %s", exc)
+            raise HTTPException(status_code=500, detail="transcription_failed") from exc
+        if not transcript:
+            raise HTTPException(status_code=400, detail="unable to transcribe audio")
+        return {
+            "transcript": transcript,
+        }
+
+    class TTSRequest(BaseModel):
+        text: str
+
+    @api.post("/tts")
+    async def tts_endpoint(payload: TTSRequest):
+        if not payload.text.strip():
+            raise HTTPException(status_code=400, detail="text required")
+        try:
+            audio_bytes = generate_speech(payload.text.strip())
+        except Exception as exc:
+            logging.exception("tts failed: %s", exc)
+            raise HTTPException(status_code=500, detail="tts_failed") from exc
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="tts_empty_audio")
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        return {"audio_base64": audio_b64}
 
     @app.websocket("/chat/stream")
     async def chat_stream(ws: WebSocket):
