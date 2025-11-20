@@ -1,0 +1,4 @@
+{"ts": "2025-11-19T13:26:35.712853", "phase": "chat_stream_start", "model": "gpt-5"}
+{"ts": "2025-11-19T13:26:43.556952", "event_type": "chat_chunk", "has_piece": false, "has_cumulative": false}
+{"ts": "2025-11-19T13:26:50.464738", "event_type": "chat_chunk", "has_piece": false, "has_cumulative": false}
+{"ts": "2025-11-19T13:26:50.466954", "phase": "chat_stream_end"}

@@ -1,0 +1,60 @@
+Willit Reasoning & Tool Streaming — Debug Plan
+=============================================
+
+Current problem
+---------------
+- Frontend “Debug stream” shows no reasoning deltas and no tool-events even when Requests succeed.
+- Backend logs do not clearly confirm that OpenAI ever emits `response.reasoning_*` or `response.*tool*` events for Willit sessions.
+- Learned Hand’s workbench/query_record streaming successfully surfaces those event types, so we know the model and API support them in this environment.
+
+Key differences vs. `learned-hand-ai/platform/server/src/query_record/streaming_service.py`
+------------------------------------------------------------------------------------------
+1. **Client + execution model**
+   - Workbench uses `AsyncOpenAI().responses.stream(...)` directly inside an async context (`async with ...` + `async for event in stream`), so no threading or executor hop is involved.
+   - Willit calls `sync_client.responses.stream(...)` inside `run_in_executor` (see `backend/willit/chat_router.py:175-207`). That blocks a worker thread and relies on `loop.call_soon_threadsafe` to shuttle events back. If the `sync_client` silently falls back to Chat Completions, we would never see reasoning/tool events.
+
+2. **Stream parameters**
+   - Workbench explicitly sets `tool_choice="required"`, `max_output_tokens`, `store=True`, `metadata={}`, and `include=["reasoning.encrypted_content"]`.
+   - Willit only passes `tools=[{"type":"web_search_preview",...}]` plus `reasoning={"effort":..., "summary":"medium"}` and `include=["reasoning.encrypted_content"]` (recent change), but omits `tool_choice="required"` and other knobs. Without `tool_choice`, web-search usage is optional and often skipped, so no tool events fire.
+
+3. **Event coverage**
+   - Workbench handles *all* relevant event types (`response.output_text.delta`, `response.reasoning_text.delta`, `response.reasoning_summary_text.delta`, `response.mcp_*`, etc.) and forwards them directly to the SSE clients.
+   - Willit currently emits a `tool_event` only when the event type string happens to contain `.tool`/`.search` or starts with `response.mcp_` (see driver). That excludes other tool events like `response.web_search_usage` or `response.tool_call.delta`. We also never forward the `response.reasoning_*` deltas unless `on_reasoning_delta` fires, which hasn’t happened yet.
+
+4. **Frontend signaling**
+   - Workbench FE listens to dedicated `reasoning` / `event` SSE types.
+   - Willit FE expects bespoke `assistant_reasoning_delta` / `tool_event` frames. Because the backend is never emitting those frames, the new UI debug panel naturally stays empty.
+
+Root-cause hypotheses
+---------------------
+H1. `_has_responses_api()` returns `False` at runtime, forcing the driver into Chat Completions mode (which never emits reasoning/body events). If so, our entire reasoning pipeline is bypassed.
+H2. Even when Responses mode is active, the lack of `tool_choice` and the minimal `include` set causes OpenAI to skip reasoning/tool telemetry (e.g., some models require `include=["tool_output","response.metadata","reasoning"]`).
+H3. Running the sync client in a thread while marshalling events might swallow non-text deltas due to the `stream` iterator choking on event types the heuristic doesn’t recognize.
+
+Plan of attack (no code yet)
+----------------------------
+1. **Verify runtime mode & event availability**
+   - Add a temporary diagnostic endpoint/log to print `WILLIT_STREAM_MODE`, `_has_responses_api()`, and whether `sync_client.responses` exists. Confirm we truly enter the Responses branch.
+   - During one request, capture the raw `event.type` sequence in the executor thread (write to a session-specific log file under `uploads/<session>/responses_events.log`). This mirrors Workbench’s reasoning logging and will reveal whether OpenAI is emitting reasoning/tool events that we simply ignore.
+
+2. **Align stream configuration with Workbench**
+   - Match the parameters that are known to unlock reasoning/tool use: `tool_choice="required"`, `store=True`, `metadata={}`, `max_output_tokens` (or at least `max_completion_tokens`).
+   - Ensure the `include` array covers `["reasoning.encrypted_content", "web_search.citations"]` (if available) so the server is allowed to send those deltas.
+
+3. **Switch to Async client (optional but safer)**
+   - To eliminate threading edge cases, adopt an async helper (similar to `_stream_section_progress`) that awaits `AsyncOpenAI.responses.stream` and pushes events through an async queue consumed by the WS loop. This matches Learned Hand’s proven pattern.
+
+4. **Normalize event forwarding**
+   - Instead of heuristics, explicitly map known event types to WS payloads (e.g., `response.reasoning_text.delta -> assistant_reasoning_delta`, `response.web_search.usage -> tool_event`, `response.tool_call.delta -> tool_event`). Keep a fallback that logs unknown event types so we can extend coverage later.
+
+5. **Frontend validation**
+   - Once backend emits real events, confirm via browser devtools that `assistant_reasoning_delta` and `tool_event` frames arrive, then update the UI (if needed) to display them clearly (badge + debug panel already exist but can be refined if event volume increases).
+
+Next steps
+----------
+Wait for approval, then:
+1. Implement the diagnostic logging (Step 1) to confirm actual event flow.
+2. If Responses mode is confirmed, proceed with Steps 2–4 to match Workbench’s streaming behavior.
+3. Re-test with the existing debug panel to validate reasoning/tool visibility end-to-end.
+
+No code changes were made as part of this planning step.
