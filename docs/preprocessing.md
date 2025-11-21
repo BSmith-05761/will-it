@@ -20,7 +20,7 @@ Goal: Convert raw uploads into LLM‑optimized, biomarked plain text blocks. Pre
   - If still poor: mark `mode: snapshots` and include page images for multimodal.
 - Biomarkers:
   - Split text on `\n\n` boundaries.
-  - For each segment, append a trailing biomarker `mrkr||<document_name>||d-<hex>` where `<hex>` is a stable short hash of the segment.
+  - For each segment, append a trailing biomarker `【mrkr||<document_name>||d-<hex>】` where `<hex>` is a stable short hash of the segment.
   - Join segments with `\n\n` preserved.
 - Wrap each document:
   - `Start of document, <Document name/title/type>\n\n<biomarked text>\n\nEnd of document`
@@ -32,7 +32,7 @@ Goal: Convert raw uploads into LLM‑optimized, biomarked plain text blocks. Pre
 - When `mode: snapshots`, include `snapshots[]` (image bytes or opaque references) for multimodal prompts.
 
 ## Biomarker Format
-- Exact token: `mrkr||<document_name>||d-<hex>`
+- Exact token: `【mrkr||<document_name>||d-<hex>】`
 - `mrkr` literal must always exist.
 - `<document_name>`: stable display name; avoid punctuation if possible.
 - `<hex>`: lowercase hex (e.g., first 10 of SHA1 of `document_name + "::" + segment`).
@@ -48,4 +48,3 @@ Goal: Convert raw uploads into LLM‑optimized, biomarked plain text blocks. Pre
 - Very large files: truncate or page‑limit OCR with clear note in `quality.reason`.
 
 Use `backend/willit/preprocessing.py` for the reference implementation; keep it nimble and dependency‑optional.
-

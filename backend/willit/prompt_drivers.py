@@ -537,9 +537,11 @@ def stream_gpt_web_responses(
     if mode == "responses" and _has_responses_api():
         final_response_text = ""
         allow_reasoning = os.getenv("WILLIT_STREAM_REASONING", "true").lower() == "true"
+        effort_value = (effort or "").strip().lower()
+        enable_reasoning = allow_reasoning and effort_value not in ("", "none")
         stream_kwargs: dict[str, Any] = {}
-        if allow_reasoning:
-            stream_kwargs["reasoning"] = {"effort": effort, "summary": "auto"}
+        if enable_reasoning:
+            stream_kwargs["reasoning"] = {"effort": effort_value or "medium", "summary": "auto"}
             stream_kwargs["include"] = ["reasoning.encrypted_content"]
             stream_kwargs["text"] = {"verbosity": verbosity}
         else:
@@ -571,11 +573,12 @@ def stream_gpt_web_responses(
                 },
             }
         )
+        max_tool_calls_param = max_tool_calls if enable_web_search else 1
         with sync_client.responses.stream(
             model=model_name,
             input=input_prompt,
             tools=tool_payload or None,
-            max_tool_calls=max_tool_calls if enable_web_search else 0,
+            max_tool_calls=max_tool_calls_param,
             **stream_kwargs,
         ) as stream:
             for event in stream:

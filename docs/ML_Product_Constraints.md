@@ -47,7 +47,7 @@ Purpose: Define strict product constraints for the end‑to‑end agent experien
   - Images: ≤ 10 MB each; PDFs: ≤ 25 MB; DOCX/TXT: ≤ 10 MB. Batches ≤ 100 MB total.
 - Preprocessing behavior (see preprocessing.md):
   - Prefer native text (TXT/DOCX). PDFs: try text → OCR if low quality → snapshots if still poor.
-  - Biomarkers appended at `\n\n` segment ends: `mrkr||<document_name>||d-<hex>`.
+  - Biomarkers appended at `\n\n` segment ends: `【mrkr||<document_name>||d-<hex>】`.
   - Wrapped doc blocks: `Start of document, <name|type>` … `End of document`.
 - Multimodal fallback:
   - If extraction poor, attach page snapshots; prompt functions may call a vision model branch.
@@ -91,4 +91,3 @@ Purpose: Define strict product constraints for the end‑to‑end agent experien
 - Failures degrade gracefully with clear user messaging; chat remains usable.
 
 See also: backend.md, frontend_ux.md, preprocessing.md, business_logic_phases.md, legal_requirements_us.md.
-

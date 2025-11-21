@@ -9,12 +9,43 @@ import json
 from datetime import datetime
 from collections import defaultdict
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from .prompt_drivers import stream_gpt_web_responses
 
 logger = logging.getLogger("willit.chat")
 UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "uploads"
 UPLOAD_ROOT.mkdir(exist_ok=True)
+
+_SESSION_STORAGE_DIRS: dict[str, Path] = {}
+
+
+def _timestamp_folder(base: Path) -> Path:
+    now = datetime.now(ZoneInfo("America/New_York"))
+    label = now.strftime("%m-%d-%H-%M")
+    target = base / label
+    suffix = 1
+    while target.exists():
+        target = base / f"{label}-{suffix}"
+        suffix += 1
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def register_session_storage_dir(session_id: str, directory: Path):
+    """Record an explicit storage directory for a session."""
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+    _SESSION_STORAGE_DIRS[session_id] = directory
+
+
+def _get_storage_dir(session_id: str) -> Path:
+    path = _SESSION_STORAGE_DIRS.get(session_id)
+    if path and path.exists():
+        return path
+    new_dir = _timestamp_folder(UPLOAD_ROOT)
+    _SESSION_STORAGE_DIRS[session_id] = new_dir
+    return new_dir
 
 
 def _load_business_logic_text() -> str:
@@ -82,14 +113,46 @@ _DRAFTS: dict[str, dict] = defaultdict(dict)
 def _persist_history(session_id: str):
     try:
         history = _HISTORY.get(session_id, [])
-        path = UPLOAD_ROOT / session_id
-        path.mkdir(parents=True, exist_ok=True)
+        path = _get_storage_dir(session_id)
         (path / "message_history.json").write_text(
             json.dumps(history, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except Exception as exc:
         logger.exception("Failed to persist history for %s: %s", session_id, exc)
+
+
+def append_upload_context(session_id: str, file_label: str, processed_text: str):
+    """Append uploaded document text into the chat history as a user note."""
+    text = (processed_text or "").strip()
+    if not text:
+        return
+    history = _get_history(session_id)
+    note = (
+        f"User uploaded this file ({file_label}). Use it as reference if needed or helpful.\n"
+        f"```\n{text}\n```"
+    )
+    history.append({"role": "user", "content": [{"type": "input_text", "text": note}]})
+    _persist_history(session_id)
+
+
+def append_upload_image(session_id: str, file_label: str, image_base64: str, mime_type: str | None = None):
+    """Append an uploaded image into chat history for multimodal context."""
+    if not image_base64:
+        return
+    history = _get_history(session_id)
+    content = [
+        {
+            "type": "input_text",
+            "text": f"User uploaded an image ({file_label}). Use it as reference if needed or helpful.",
+        }
+    ]
+    block: dict = {"type": "input_image", "image_base64": image_base64}
+    if mime_type:
+        block["mime_type"] = mime_type
+    content.append(block)
+    history.append({"role": "user", "content": content})
+    _persist_history(session_id)
 
 
 def _create_event_recorder(session_id: str) -> Callable[[dict], None]:
@@ -155,7 +218,7 @@ async def handle_user_message(ws_send_json, message: Dict[str, Any], session_id:
             reasoning_seen = False
             event_recorder = _create_event_recorder(session_id)
             enable_web = mode != "fast"
-            effort = "low" if mode == "fast" else "medium"
+            effort = None if mode == "fast" else "medium"
 
             loop = asyncio.get_running_loop()
 
@@ -263,8 +326,7 @@ def _persist_drafts(session_id: str):
         drafts = _DRAFTS.get(session_id)
         if drafts is None:
             return
-        path = UPLOAD_ROOT / session_id
-        path.mkdir(parents=True, exist_ok=True)
+        path = _get_storage_dir(session_id)
         (path / "draft_history.json").write_text(
             json.dumps(drafts, ensure_ascii=False, indent=2),
             encoding="utf-8",

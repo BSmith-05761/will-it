@@ -4,7 +4,7 @@ Design goals
 - Prefer DOCX/TXT over PDF for text extraction.
 - Accept PDFs; if text quality is poor, OCR or fall back to snapshots for multimodal.
 - Split text on double newlines and append biomarkers of the form:
-  mrkr||<document_name>||d-<hex>
+  【mrkr||<document_name>||d-<hex>】
 - Wrap each document with:
   Start of document, <Document name/title/type>
 
@@ -21,6 +21,7 @@ import hashlib
 import io
 import re
 from typing import Any, Dict, List, Optional, Tuple
+import base64
 
 
 def _guess_ext(filename: str) -> str:
@@ -137,7 +138,7 @@ def _quality_score(text: str, page_count: int | None = None) -> Tuple[float, str
 def _make_biomarker(document_name: str, segment: str) -> str:
     # stable short hash of name + segment
     digest = hashlib.sha1((document_name + "::" + segment).encode("utf-8", "ignore")).hexdigest()[:10]
-    return f"mrkr||{document_name}||d-{digest}"
+    return f"【mrkr||{document_name}||d-{digest}】"
 
 
 def _biomark_text(text: str, document_name: str) -> Tuple[str, int]:
@@ -166,6 +167,24 @@ def _wrap_document_block(name: str, doc_type: str, biomarked_text: str) -> str:
     return f"{header}\n\n{biomarked_text}\n\n{footer}"
 
 
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+
+
+def _image_to_png_base64(data: bytes) -> Tuple[str, str]:
+    """Convert arbitrary image bytes to PNG base64 for consistent previews."""
+    try:
+        from PIL import Image  # type: ignore
+
+        with Image.open(io.BytesIO(data)) as im:
+            converted = im.convert("RGBA") if im.mode in ("RGBA", "LA") else im.convert("RGB")
+            buffer = io.BytesIO()
+            converted.save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return encoded, "image/png"
+    except Exception:
+        return base64.b64encode(data).decode("ascii"), "image/png"
+
+
 def preprocess_document(*, filename: str, blob: bytes, doc_type: str | None = None, display_name: str | None = None) -> Dict[str, Any]:
     """Preprocess a single document to biomarked text.
 
@@ -183,6 +202,8 @@ def preprocess_document(*, filename: str, blob: bytes, doc_type: str | None = No
     method = ""
     page_count: Optional[int] = None
     snapshots: List[Any] | None = None
+    image_base64: Optional[str] = None
+    image_mime: Optional[str] = None
 
     if ext in ("txt",):
         text = _decode_txt(blob)
@@ -210,10 +231,11 @@ def preprocess_document(*, filename: str, blob: bytes, doc_type: str | None = No
                     method = "pdf_snapshots"
             else:
                 method = "pdf_text_poor"
-    elif ext in ("png", "jpg", "jpeg", "tiff"):
+    elif ext in IMAGE_EXTENSIONS:
         text = _image_bytes_to_text(blob)
         method = "image_ocr"
         page_count = 1
+        image_base64, image_mime = _image_to_png_base64(blob)
     else:
         # Unknown type: try UTF-8 decode
         text = _decode_txt(blob)
@@ -248,6 +270,8 @@ def preprocess_document(*, filename: str, blob: bytes, doc_type: str | None = No
         "snapshots": snapshots,
         "page_count": page_count,
         "ocr_attempted": method in ("pdf_ocr", "image_ocr"),
+        "image_base64": image_base64,
+        "mime_type": image_mime,
     }
 
 
@@ -276,4 +300,3 @@ def preprocess_documents(documents: List[Dict[str, Any]]) -> Dict[str, Any]:
         results.append(res)
         blocks.append(res.get("text_block", ""))
     return {"text": "\n\n".join(b for b in blocks if b), "documents": results}
-

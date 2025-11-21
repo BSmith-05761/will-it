@@ -140,6 +140,26 @@ body {
   justify-content: flex-end;
 }
 
+.upload-indicator {
+  font-size: 0.85rem;
+  color: #cbd5f5;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(59, 130, 246, 0.12);
+  align-self: center;
+}
+
+.upload-indicator {
+  font-size: 0.85rem;
+  color: #cbd5f5;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(59, 130, 246, 0.12);
+  align-self: center;
+}
+
 .primary-button,
 .ghost-button {
   border-radius: 999px;
@@ -228,6 +248,71 @@ body {
 .message-bubble.assistant {
   background: linear-gradient(120deg, rgba(124, 58, 237, 0.16), rgba(59, 7, 100, 0.4));
   border-color: rgba(167, 139, 250, 0.4);
+}
+
+.assistant-thinking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.thinking-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.18);
+  color: #c4b5fd;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thinking-bubble {
+  flex: 1;
+  background: rgba(148, 163, 184, 0.18);
+  border-radius: 18px;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  color: #e2e8f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.thinking-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.75);
+  animation: pulseDots 1s infinite ease-in-out;
+}
+
+.thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes pulseDots {
+  0%, 80%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }
 
 .message-bubble.tool {
@@ -638,6 +723,113 @@ body {
   gap: 12px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+
+.uploads-panel {
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 12px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.45);
+  margin-bottom: 16px;
+}
+
+.upload-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.upload-status-pill {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: #cbd5f5;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.upload-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upload-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9rem;
+  color: #e2e8f0;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  padding-top: 6px;
+  cursor: pointer;
+}
+
+.upload-list li:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.upload-list li.active {
+  color: #c4b5fd;
+}
+
+.upload-meta {
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.upload-preview-card {
+  margin-top: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.upload-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.upload-preview-body.text {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 0.85rem;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  background: rgba(15, 23, 42, 0.7);
+  border-radius: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.upload-preview-body.image {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  background: rgba(15, 23, 42, 0.4);
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.upload-preview-body.image img {
+  max-width: 100%;
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(2, 6, 23, 0.4);
 }
 
 .mode-buttons {

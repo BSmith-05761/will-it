@@ -1,11 +1,13 @@
 import os
 import sys
+import json
 import logging
 import base64
 from pathlib import Path
 from uuid import uuid4
 from typing import List
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, APIRouter, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
@@ -30,7 +32,12 @@ except Exception:
     pass
 
 from willit.preprocessing import preprocess_documents
-from willit.chat_router import handle_user_message
+from willit.chat_router import (
+    handle_user_message,
+    append_upload_context,
+    append_upload_image,
+    register_session_storage_dir,
+)
 from willit.voice import transcribe_audio, generate_speech
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -76,32 +83,96 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="session not found")
         return s
 
-    def _ensure_session_dir(session_id: str) -> Path:
-        path = UPLOAD_ROOT / session_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+    def _sanitize_name(name: str) -> str:
+        allowed = "-_."
+        cleaned = "".join(ch if ch.isalnum() or ch in allowed else "_" for ch in name.strip())
+        return cleaned or f"file-{uuid4().hex}"
 
     @api.post("/uploads")
     async def upload(session_id: str | None = None, files: List[UploadFile] = File(...)):
         sid = session_id or "default"
-        session_dir = _ensure_session_dir(sid)
-        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+        now = datetime.now(ZoneInfo("America/New_York"))
+        display_stamp = now.strftime("%m/%d/%H/%M")
+        folder_stamp = display_stamp.replace("/", "-")
+        run_dir = UPLOAD_ROOT / folder_stamp
+        suffix = 1
+        while run_dir.exists():
+            run_dir = UPLOAD_ROOT / f"{folder_stamp}-{suffix}"
+            suffix += 1
+        run_dir.mkdir(parents=True, exist_ok=True)
+        register_session_storage_dir(sid, run_dir)
         docs = []
+        stored_files = []
         for uf in files:
             blob = await uf.read()
             safe_name = uf.filename or f"file-{uuid4().hex}"
-            raw_path = session_dir / f"{timestamp}-{safe_name}"
+            cleaned = _sanitize_name(safe_name)
+            raw_filename = f"processed_file_{cleaned}"
+            raw_path = run_dir / raw_filename
             try:
                 raw_path.write_bytes(blob)
             except Exception:
                 logging.exception("Failed to persist raw upload %s", raw_path)
+            stored_files.append(
+                {
+                    "original_name": safe_name,
+                    "stored_name": raw_filename,
+                    "bytes": len(blob),
+                }
+            )
             docs.append({"filename": safe_name, "blob": blob})
         result = preprocess_documents(docs)
+        evidence_records = []
         try:
-            processed_path = session_dir / f"preprocessed-{timestamp}.txt"
-            processed_path.write_text(result.get("text", ""), encoding="utf-8")
+            documents = result.get("documents") or []
+            for idx, doc in enumerate(documents, start=1):
+                doc_name = doc.get("name") or doc.get("filename") or f"document-{idx}"
+                cleaned_doc = _sanitize_name(doc_name)
+                processed_text = doc.get("text_block") or ""
+                if processed_text:
+                    evidence_filename = f"Processed_evidance_{cleaned_doc}.txt"
+                    evidence_path = run_dir / evidence_filename
+                    evidence_path.write_text(processed_text, encoding="utf-8")
+                    evidence_records.append(
+                        {
+                            "document_name": doc_name,
+                            "stored_name": evidence_filename,
+                            "biomarker_count": doc.get("biomarker_count"),
+                            "mode": doc.get("mode"),
+                        }
+                    )
+                    try:
+                        append_upload_context(sid, doc_name, processed_text)
+                    except Exception:
+                        logging.exception("Failed to append upload context for %s", doc_name)
+                image_b64 = doc.get("image_base64")
+                if image_b64:
+                    try:
+                        append_upload_image(sid, doc_name, image_b64, doc.get("mime_type"))
+                    except Exception:
+                        logging.exception("Failed to append uploaded image for %s", doc_name)
         except Exception:
-            logging.exception("Failed to persist preprocessed text for session %s", sid)
+            logging.exception("Failed to persist processed evidence for upload folder %s", run_dir.name)
+        metadata = {
+            "session_id": sid,
+            "timestamp_label": display_stamp,
+            "timestamp_iso": now.isoformat(),
+            "run_directory": run_dir.name,
+            "file_count": len(stored_files),
+            "settings": {
+                "model": os.getenv("WILLIT_MODEL", "gpt-5.1"),
+                "allow_network": os.getenv("WILLIT_ALLOW_NETWORK", "false"),
+            },
+            "files": stored_files,
+            "evidence": evidence_records,
+        }
+        try:
+            (run_dir / "metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            logging.exception("Failed to write metadata for upload folder %s", run_dir.name)
         return JSONResponse(result)
 
     @api.post("/voice-query")

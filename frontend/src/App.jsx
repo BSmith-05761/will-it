@@ -64,6 +64,11 @@ export default function App() {
   const [voicePlaying, setVoicePlaying] = useState(false)
   const [voicePaused, setVoicePaused] = useState(false)
   const [readResponses, setReadResponses] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [uploadedFiles, setUploadedFiles] = useState([])
+  const [showUploads, setShowUploads] = useState(false)
+  const [activeUploadId, setActiveUploadId] = useState(null)
+  const [assistantThinking, setAssistantThinking] = useState(false)
   const wsRef = useRef(null)
   const fileInputRef = useRef(null)
   const messageScrollRef = useRef(null)
@@ -75,6 +80,7 @@ export default function App() {
   const requestTTSRef = useRef(null)
   const readResponsesRef = useRef(true)
   const ttsRunIdRef = useRef(0)
+  const activeUpload = uploadedFiles.find((file) => file.id === activeUploadId) || null
 
   useEffect(() => {
     if (!reasoningActive) {
@@ -150,8 +156,10 @@ export default function App() {
       try {
         const msg = JSON.parse(ev.data)
         if (msg.type === 'assistant_delta') {
+          setAssistantThinking(false)
           applyStreamDelta('assistant', msg.text_delta || '', msg.full_text)
         } else if (msg.type === 'assistant_reasoning_delta') {
+          setAssistantThinking(false)
           const roleKey = msg.variant === 'summary' ? 'assistant_reasoning_summary' : 'assistant_reasoning'
           setReasoningActive(true)
           applyStreamDelta(roleKey, msg.text_delta || '', msg.full_text)
@@ -179,8 +187,10 @@ export default function App() {
         } else if (msg.type === 'tool_event') {
           handleToolEvent(msg)
         } else if (msg.type === 'error') {
+          setAssistantThinking(false)
           setMessages((prev) => [...prev, { role: 'tool', text: `Error: ${msg.message || msg.code}` }])
         } else if (msg.type === 'assistant_complete') {
+          setAssistantThinking(false)
           if (readResponsesRef.current && requestTTSRef.current) {
             requestTTSRef.current(msg.text)
           }
@@ -296,6 +306,7 @@ useLayoutEffect(() => {
     wsRef.current.send(JSON.stringify({ type: 'user_message', text: t, mode }))
     setText('')
     setVoiceTranscript('')
+    setAssistantThinking(true)
   }
 
   const send = () => sendMessage(text)
@@ -306,12 +317,43 @@ useLayoutEffect(() => {
     const fd = new FormData()
     for (const f of files) fd.append('files', f)
     const sid = session?.id ? encodeURIComponent(session.id) : 'default'
-    const res = await fetch(`${backend}/api/uploads?session_id=${sid}`, { method: 'POST', body: fd })
-    const json = await res.json()
-    setMessages((prev) => [
-      ...prev,
-      { role: 'tool', text: 'Upload processed: ' + (json?.documents?.map((d) => `${d.name} (${d.mode})`).join(', ') || '') },
-    ])
+    setUploading(true)
+    try {
+      const res = await fetch(`${backend}/api/uploads?session_id=${sid}`, { method: 'POST', body: fd })
+      if (!res.ok) throw new Error(`Upload failed (${res.status})`)
+      const json = await res.json()
+      const docList = Array.isArray(json?.documents) ? json.documents : []
+      const uploadStamp = new Date().toLocaleString()
+      const summaries = docList.map((doc, idx) => ({
+        id: `${Date.now()}-${idx}-${doc?.name || doc?.filename || 'doc'}`,
+        name: doc?.name || doc?.filename || `Document ${idx + 1}`,
+        mode: doc?.mode || 'text',
+        uploadedAt: uploadStamp,
+        textPreview: doc?.text_block || '',
+        imageBase64: doc?.image_base64 || '',
+        mimeType: doc?.mime_type || '',
+      }))
+      setUploadedFiles((prev) => [...summaries, ...prev])
+      if (summaries.length > 0) {
+        setShowUploads(true)
+        setActiveUploadId(summaries[0].id)
+      }
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'tool',
+          text: 'Upload processed: ' + (json?.documents?.map((d) => `${d.name} (${d.mode})`).join(', ') || ''),
+        },
+      ])
+    } catch (err) {
+      console.error(err)
+      setMessages((prev) => [...prev, { role: 'tool', text: 'Upload failed. Please try again.' }])
+    } finally {
+      setUploading(false)
+      if (e?.target) {
+        e.target.value = ''
+      }
+    }
   }
 
   const triggerUpload = () => fileInputRef.current?.click()
@@ -592,9 +634,10 @@ useLayoutEffect(() => {
             </div>
             <div className="card-actions">
               <input ref={fileInputRef} className="hidden-file" type="file" multiple onChange={onUpload} />
-              <button className="ghost-button subtle" onClick={triggerUpload}>
+              <button className="ghost-button subtle" onClick={triggerUpload} disabled={uploading}>
                 Add files
               </button>
+              {uploading && <span className="upload-indicator">Uploading…</span>}
               <button className="primary-button" onClick={send}>
                 Send
               </button>
@@ -619,6 +662,65 @@ useLayoutEffect(() => {
             </div>
           </div>
 
+          {(uploadedFiles.length > 0 || uploading) && (
+            <div className="uploads-panel">
+              <button
+                className="upload-toggle"
+                onClick={() => setShowUploads((s) => !s)}
+              >
+                <span>{showUploads ? '▾' : '▸'}</span>
+                <span>Uploads ({uploadedFiles.length})</span>
+                {uploading && <span className="upload-status-pill">Uploading…</span>}
+              </button>
+              {showUploads && (
+                <>
+                  <ul className="upload-list">
+                    {uploadedFiles.length === 0 && !uploading && (
+                      <li>
+                        <span className="upload-meta">No files yet.</span>
+                      </li>
+                    )}
+                    {uploadedFiles.map((doc) => (
+                      <li
+                        key={doc.id}
+                        className={doc.id === activeUploadId ? 'active' : ''}
+                        onClick={() => setActiveUploadId(doc.id === activeUploadId ? null : doc.id)}
+                      >
+                        <div>
+                          <strong>{doc.name}</strong>
+                          <span className="upload-meta"> · {doc.mode}</span>
+                        </div>
+                        <span className="upload-meta">{doc.uploadedAt}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {activeUpload && (
+                    <div className="upload-preview-card">
+                      <div className="upload-preview-header">
+                        <h4>{activeUpload.name}</h4>
+                        <button className="ghost-button subtle" onClick={() => setActiveUploadId(null)}>
+                          Close
+                        </button>
+                      </div>
+                      {activeUpload.imageBase64 ? (
+                        <div className="upload-preview-body image">
+                          <img
+                            src={`data:${activeUpload.mimeType || 'image/png'};base64,${activeUpload.imageBase64}`}
+                            alt={activeUpload.name}
+                          />
+                        </div>
+                      ) : (
+                        <pre className="upload-preview-body text">
+                          {activeUpload.textPreview || 'No preview available.'}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <div className="message-scroll-container">
             <div
               className="message-scroll"
@@ -634,12 +736,25 @@ useLayoutEffect(() => {
                   <p>Ask anything about probate rules, upload prior wills, or paste tricky scenarios to get started.</p>
                 </div>
               )}
-            {messages.map((m, i) => (
-              <div key={i} className={roleClass(m.role)}>
-                <div className="message-role">{roleLabel[m.role] || m.role}</div>
-                <div className="message-text">{m.text}</div>
-              </div>
-            ))}
+              {messages.map((m, i) => (
+                <div key={i} className={roleClass(m.role)}>
+                  <div className="message-role">{roleLabel[m.role] || m.role}</div>
+                  <div className="message-text">{m.text}</div>
+                </div>
+              ))}
+              {assistantThinking && (
+                <div className="assistant-thinking">
+                  <div className="thinking-avatar">AI</div>
+                  <div className="thinking-bubble">
+                    <span>Assistant is deciding what to do…</span>
+                    <span className="thinking-dots">
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  </div>
+                </div>
+              )}
               {reasoningActive && (
                 <div className="reasoning-indicator">
                   <div className="ping" style={{ opacity: 0.4 + 0.15 * reasoningDots }} />
@@ -677,7 +792,7 @@ useLayoutEffect(() => {
               className="composer-textarea"
             />
             <div className="composer-footer">
-              <button className="ghost-button subtle" onClick={triggerUpload}>
+              <button className="ghost-button subtle" onClick={triggerUpload} disabled={uploading}>
                 Upload
               </button>
               <button className="primary-button" onClick={send}>
