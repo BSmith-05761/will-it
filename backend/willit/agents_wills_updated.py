@@ -13,7 +13,7 @@ except Exception:
 # Tool definitions
 file_search = FileSearchTool(
   vector_store_ids=[
-    "vs_68f17be16af48191a4451d421f3af3c3"
+    ""
   ]
 )
 # Shared client for guardrails and file search
@@ -27,7 +27,7 @@ guardrails_config = (
         "name": "Hallucination Detection",
         "config": {
           "model": "gpt-4.1-mini",
-          "knowledge_source": "vs_68f17be16af48191a4451d421f3af3c3",
+          "knowledge_source": "",
           "confidence_threshold": 0.8
         }
       }
@@ -221,3 +221,4 @@ async def run_workflow(workflow_input: WorkflowInput):
       else:
         return guardrails_output
     return guardrails_inputtext
+
